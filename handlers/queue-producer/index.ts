@@ -1,23 +1,24 @@
-import { SQSClient, SendMessageBatchCommand } from '@aws-sdk/client-sqs';
+import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 
-import kuid from 'kuid';
-import { readFileSync } from 'node:fs';
+import kuid from "kuid";
+import { readFileSync } from "node:fs";
 
 function setup() {
-  const csv = readFileSync('./MOCK_DATA.csv').toString();
-  const lines = csv.split('\n');
-  const header = lines.shift()!.split(',');
+  const csv = readFileSync("./MOCK_DATA.csv").toString();
+  const lines = csv.split("\n");
+  const header = lines.shift()!.split(",");
 
-  return lines.map((line) => line.split(','))
+  return lines
+    .map((line) => line.split(","))
     .filter((line) => line.length === header.length)
     .map((values) => {
       const data: any = {};
       values.forEach((value, i) => {
-        data[header[i]] = value.replace('\n', '');
+        data[header[i]] = value.replace("\n", "");
       });
       return data;
     })
-    .map(data => {
+    .map((data) => {
       data.pk = kuid();
       data.sk = +Date.now();
       return data;
@@ -34,25 +35,36 @@ export function* chunk(arr: Array<any>, stride = 25) {
 
 const data = setup();
 
-const queueUrl = process.env.QUEUE_URL as string;
+const queueUrl = process.env.QUEUE_URL!;
 
 const client = new SQSClient();
 
-export const handler = async () => {
-  let i = 0;
+const DISTRIBUTION_WINDOW =
+  process.env.DISTRIBUTION_WINDOW &&
+  !isNaN(parseInt(process.env.DISTRIBUTION_WINDOW))
+    ? parseInt(process.env.DISTRIBUTION_WINDOW)
+    : 900; // 15 minutes in seconds
 
-  for (const messages of chunk(data, 10)) {
+export const handler = async () => {
+  const chunks = Array.from(chunk(data, 10));
+  const totalMessages = data.length;
+
+  // Calculate even distribution: spread all messages across the time window
+  const delayIncrement = DISTRIBUTION_WINDOW / totalMessages;
+
+  let messageIndex = 0;
+
+  for (const messages of chunks) {
     const command = new SendMessageBatchCommand({
       QueueUrl: queueUrl,
-      Entries: messages.map((message, j) => ({
-        DelaySeconds: i * j, // modify this so adjust write demand
+      Entries: messages.map((message) => ({
+        DelaySeconds: Math.floor(messageIndex * delayIncrement),
         Id: message.pk,
-        MessageBody: JSON.stringify(message)
+        MessageBody: JSON.stringify(message),
       })),
     });
 
     await client.send(command);
-
-    i++;
+    messageIndex += messages.length;
   }
-}
+};
